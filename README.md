@@ -1,33 +1,16 @@
 # Adaptive Batch Normalization (AdaBN) in PyTorch
 
-This repository contains an implementation of **Adaptive Batch Normalization (AdaBN)** in PyTorch, a technique that adapts batch normalization statistics to better generalize across domain shifts and other dataset-specific variations.
+This repository contains an implementation of **Adaptive Batch Normalization (AdaBN)** in PyTorch, a technique that adapts batch normalization statistics to better generalize across domain shifts.
 
 [Revisiting Batch Normalization For Practical Domain Adaptation](https://arxiv.org/abs/1603.04779)
-
----
 
 ## Files in the Repository
 
 - **`batchnorm_adapt.py`**  
-  Implements the core functionality of Adaptive Batch Normalization (AdaBN). This includes adapting batch normalization statistics to new datasets or domains. 
+  Main script that demonstrates AdaBN usage. 
 
 - **`utils.py`**  
-  Contains utility functions supporting the main implementation, such as data preprocessing, logging, and model manipulation.
-
----
-
-## Key Features
-
-- **Adaptation to Domain Shifts**  
-  AdaBN updates batch normalization statistics to match the target domain, improving model generalization in scenarios like domain adaptation and test-time adaptation.
-
-- **Easy Integration**  
-  Modular implementation to easily integrate into existing PyTorch projects.
-
-- **Reusable Utilities**  
-  Helper functions for common operations related to adaptive normalization and data handling.
-
----
+  Contains the core AdaBN implementation including the hook class and statistics computation functions.
 
 ## Getting Started
 
@@ -39,3 +22,34 @@ This repository contains an implementation of **Adaptive Batch Normalization (Ad
 Install the required packages:
 ```bash
 pip install torch numpy
+```
+
+### Usage
+
+```python
+from utils import compute_bn_stats, replace_bn_stats
+
+# Set model to eval mode
+model.eval()
+
+# Compute target domain statistics
+bn_stats = compute_bn_stats(model, target_dataloader)
+
+# Apply AdaBN
+replace_bn_stats(model, bn_stats)
+```
+
+### Running the Example
+
+```bash
+python batchnorm_adapt.py
+```
+
+## How AdaBN Works
+
+AdaBN adapts models to new domains by:
+- Computing BatchNorm statistics on target domain data
+- Replacing source domain statistics with target domain statistics
+- Keeping all learned weights unchanged
+
+This requires no additional training or parameters.

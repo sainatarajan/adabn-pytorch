@@ -1,4 +1,5 @@
 import os
+
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
 import random
@@ -13,7 +14,6 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.models.resnet import resnet18
 from torchvision.models.vgg import vgg16_bn, vgg11_bn
 from functools import partial
-
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -39,7 +39,8 @@ class ImageGeneratorDataset(Dataset):
 
     def create_data(self):
         for i in range(self.num_samples):
-            self.data.append(torch.zeros(self.vector_dim))
+            # FIXED: Create some variation instead of all zeros
+            self.data.append(torch.randn(self.vector_dim) * 0.1)
 
     def __len__(self):
         return self.num_samples
@@ -91,21 +92,31 @@ class BatchNormStatHook(object):
         # Not taking care of nn.Sequential
 
         if layer_name not in self.bn_stats:
+            # FIXED: Initialize with proper structure for accumulation
             self.bn_stats[layer_name] = {'mean': 0, 'var': 0, 'count': 0}
 
+        # CRITICAL FIX #1: Process INPUT tensor, not output!
         # Ensure output is not a view (avoid potential errors)
-        output = output.clone()  # Create a copy of the output
+        x = input[0].clone()  # FIXED: Use input[0] instead of output
 
-        # Calculate mean and variance of the output
-        mean = output.mean([0, 2, 3])
-        var = output.var([0, 2, 3], unbiased=False)
+        # Calculate mean and variance of the INPUT (not output)
+        mean = x.mean([0, 2, 3])  # FIXED: Process input activations
+        var = x.var([0, 2, 3], unbiased=False)
 
-        # Update accumulated statistics for this layer
-        self.bn_stats[layer_name]['mean'] += mean.sum()
-        self.bn_stats[layer_name]['var'] += var.sum()
+        # CRITICAL FIX #2: Do NOT sum across channels! Keep per-channel info
+        batch_size = x.size(0)
+
+        # Initialize accumulators with correct shape on first call
+        if isinstance(self.bn_stats[layer_name]['mean'], int):
+            self.bn_stats[layer_name]['mean'] = torch.zeros_like(mean)
+            self.bn_stats[layer_name]['var'] = torch.zeros_like(var)
+
+        # Update accumulated statistics for this layer (keep per-channel)
+        self.bn_stats[layer_name]['mean'] += mean * batch_size  # FIXED: No .sum()!
+        self.bn_stats[layer_name]['var'] += var * batch_size  # FIXED: No .sum()!
 
         # This might not be required, but still saving just in-case
-        self.bn_stats[layer_name]['count'] += mean.numel()
+        self.bn_stats[layer_name]['count'] += batch_size  # FIXED: Count samples, not channels
 
 
 def compute_bn_stats(model, dataloader):
@@ -120,29 +131,44 @@ def compute_bn_stats(model, dataloader):
       dict: Dictionary containing layer names and their mean and variance statistics.
     """
 
+    # CRITICAL FIX #3: Set model to eval mode, not train mode!
+    original_mode = model.training
+    model.eval()  # FIXED: Changed from train() to eval()
+
     # Create a hook instance
     hook = BatchNormStatHook()
+    hook_handles = []
 
     # Register the hook on all BatchNorm layers in the model
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.BatchNorm2d):
-            module.register_forward_hook(partial(hook, name=name))
+            handle = module.register_forward_hook(partial(hook, name=name))
+            hook_handles.append(handle)  # FIXED: Store handles for cleanup
 
-    # Iterate through the dataloader
-    with torch.no_grad():
-        for data in dataloader:
-            # Forward pass (hook will accumulate statistics)
-            model(data.to(device))
+    try:
+        # Iterate through the dataloader
+        with torch.no_grad():
+            for data in dataloader:
+                # Forward pass (hook will accumulate statistics)
+                model(data.to(device))
 
-    # Calculate mean and variance for each layer
-    for layer_name, stats in hook.bn_stats.items():
-        # print("Found the layer!!!")
-        mean = stats['mean'] / stats['count']
-        var = stats['var'] / stats['count']
-        hook.bn_stats[layer_name] = {'mean': mean, 'var': var}
+        # Calculate mean and variance for each layer
+        final_stats = {}
+        for layer_name, stats in hook.bn_stats.items():
+            # print("Found the layer!!!")
+            if stats['count'] > 0:
+                mean = stats['mean'] / stats['count']  # FIXED: Now divides tensors properly
+                var = stats['var'] / stats['count']
+                final_stats[layer_name] = {'mean': mean, 'var': var}
+
+    finally:
+        # FIXED: Clean up hooks to prevent memory leaks
+        for handle in hook_handles:
+            handle.remove()
+        model.train(original_mode)  # Restore original mode
 
     # Return the accumulated statistics
-    return hook.bn_stats
+    return final_stats
 
 
 # Now replace the current stats with the computed one
@@ -150,9 +176,17 @@ def replace_bn_stats(model, bn_stats):
     with torch.no_grad():
         for name, module in model.named_modules():
             if name in bn_stats and isinstance(module, nn.BatchNorm2d):
+                # FIXED: Add shape verification
+                expected_shape = module.running_mean.shape
+                computed_mean = bn_stats[name]['mean']
+                computed_var = bn_stats[name]['var']
+
+                if computed_mean.shape != expected_shape:
+                    raise ValueError(f"Shape mismatch for {name}: expected {expected_shape}, got {computed_mean.shape}")
+
                 print('Before---------------------------------------')
                 print(module.running_mean)
-                module.running_mean.data.copy_(bn_stats[name]['mean'])
-                module.running_var.data.copy_(bn_stats[name]['var'])
+                module.running_mean.data.copy_(computed_mean.to(module.running_mean.device))  # FIXED: Handle device
+                module.running_var.data.copy_(computed_var.to(module.running_var.device))
                 print(module.running_mean)
                 print('After---------------------------------------')
